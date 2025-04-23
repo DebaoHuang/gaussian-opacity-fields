@@ -51,24 +51,51 @@ def get_frustum_mask(points: torch.Tensor, cameras: List[Camera], near: float = 
     # homo_points: (N, 4)
     homo_points = torch.cat([points, ones], dim=-1)
 
-    # uv_points: (n_view, N, 4, 4)
-    # Apply batch matrix multiplication to get uv_points for all cameras
-    view_points = einsum(view_matrices, homo_points, "n_view b c, N c -> n_view N b")
-    view_points = view_points[:, :, :3]
+    N = points.shape[0]
+    mask = torch.zeros(N, dtype=torch.bool, device=points.device)
 
-    uv_points = einsum(intrinsics, view_points, "n_view b c, n_view N c -> n_view N b")
+    for start in range(0, N, 100000):
+        end = min(start + 100000, N)
+        chunk = homo_points[start:end]  # [chunk, 4]
+        view_points = []
+        for vm in view_matrices:
+            vp = torch.matmul(chunk, vm.T)  # [chunk, 4]
+            view_points.append(vp)
+        view_points = torch.stack(view_points, dim=0)[:, :, :3]  # [n_view, chunk, 3]
 
-    z = uv_points[:, :, -1:]
-    uv_points = uv_points[:, :, :2] / z
-    u, v = uv_points[:, :, 0], uv_points[:, :, 1]
+        uv_points = []
+        for i in range(len(intrinsics)):
+            uv = torch.matmul(view_points[i], intrinsics[i].T)  # [chunk, 3]
+            uv_points.append(uv)
+        uv_points = torch.stack(uv_points, dim=0)  # [n_view, chunk, 3]
 
-    # Optionally, we can apply near-far culling
-    # Apply near-far culling
-    depth = view_points[:, :, -1]
-    cull_near_fars = (depth >= near) & (depth <= far)
+        z = uv_points[:, :, -1:]
+        uv_points = uv_points[:, :, :2] / z
+        u, v = uv_points[:, :, 0], uv_points[:, :, 1]
+        depth = view_points[:, :, -1]
+        cull_near_fars = (depth >= near) & (depth <= far)
+        chunk_mask = torch.any(cull_near_fars & (u >= 0) & (u <= W - 1) & (v >= 0) & (v <= H - 1), dim=0)
+        
+        mask[start:end] = chunk_mask
 
-    # Apply frustum mask
-    mask = torch.any(cull_near_fars & (u >= 0) & (u <= W-1) & (v >= 0) & (v <= H-1), dim=0)
+    # # uv_points: (n_view, N, 4, 4)
+    # # Apply batch matrix multiplication to get uv_points for all cameras
+    # view_points = einsum(view_matrices, homo_points, "n_view b c, N c -> n_view N b")
+    # view_points = view_points[:, :, :3]
+
+    # uv_points = einsum(intrinsics, view_points, "n_view b c, n_view N c -> n_view N b")
+
+    # z = uv_points[:, :, -1:]
+    # uv_points = uv_points[:, :, :2] / z
+    # u, v = uv_points[:, :, 0], uv_points[:, :, 1]
+
+    # # Optionally, we can apply near-far culling
+    # # Apply near-far culling
+    # depth = view_points[:, :, -1]
+    # cull_near_fars = (depth >= near) & (depth <= far)
+
+    # # Apply frustum mask
+    # mask = torch.any(cull_near_fars & (u >= 0) & (u <= W-1) & (v >= 0) & (v <= H-1), dim=0)
     return mask
 
 
@@ -261,7 +288,7 @@ class GaussianModel:
 
     @torch.no_grad()
     def compute_3D_filter(self, cameras):
-        print("Computing 3D filter")
+        # print("Computing 3D filter")
         #TODO consider focal length and image width
         xyz = self.get_xyz
         distance = torch.ones((xyz.shape[0]), device=xyz.device) * 100000.0
